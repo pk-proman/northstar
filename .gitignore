@@ -1,0 +1,32 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# macOS and logs
+.DS_Store
+*.log
+
+# Local databases, dumps and backups
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+*.bak
+*.save
+*.pre-*
+*.backup
+
+# Build and temporary files
+dist/
+build/
+.coverage
+htmlcov/

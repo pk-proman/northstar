@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: northstar
+      POSTGRES_USER: northstar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U northstar -d northstar"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - northstar_pgdata:/var/lib/postgresql/data
+    networks: [internal]
+  api:
+    build:
+      context: ../backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://northstar:${POSTGRES_PASSWORD}@db:5432/northstar
+      APP_ENV: staging
+      TRADING_MODE: PAPER
+      LIVE_EXECUTION_ENABLED: "false"
+      INITIAL_CAPITAL_INR: ${INITIAL_CAPITAL_INR:-500000}
+      MAX_CAPITAL_INR: ${MAX_CAPITAL_INR:-500000}
+      MAX_DAILY_LOSS_INR: ${MAX_DAILY_LOSS_INR:-5000}
+      MAX_RISK_PER_TRADE_PCT: ${MAX_RISK_PER_TRADE_PCT:-0.5}
+      MAX_OPEN_POSITIONS: ${MAX_OPEN_POSITIONS:-5}
+      CASH_RESERVE_PCT: ${CASH_RESERVE_PCT:-20}
+      PAPER_FEE_RATE: ${PAPER_FEE_RATE:-0.0004}
+      PAPER_SLIPPAGE_BPS: ${PAPER_SLIPPAGE_BPS:-5}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+networks:
+  internal:
+    internal: true
+volumes:
+  northstar_pgdata:

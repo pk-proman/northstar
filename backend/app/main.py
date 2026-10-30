@@ -1,6 +1,10 @@
 from datetime import datetime, timezone, timedelta, date
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from uuid import uuid4
+import hashlib
+import json
+from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -9,11 +13,9 @@ from . import models, schemas, services
 from .config import TRADING_MODE, LIVE_EXECUTION_ENABLED
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Northstar Paper Trading API", version="1.0.0",
-              description="Release 1 paper-trading backend. Live execution is deliberately not implemented.")
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     from .database import SessionLocal
     db = SessionLocal()
     try:
@@ -21,6 +23,11 @@ def startup():
         db.commit()
     finally:
         db.close()
+    yield
+
+app = FastAPI(title="Northstar Paper Trading API", version="1.1.0",
+              description="Paper-trading backend. Live execution is deliberately not implemented.",
+              lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -81,7 +88,11 @@ def get_risk_settings(db: Session = Depends(get_db)):
 @app.put("/api/v1/risk-settings")
 def update_risk_settings(req: schemas.RiskSettingsUpdate, db: Session = Depends(get_db)):
     s = services.ensure_settings(db)
-    for k,v in req.model_dump().items(): setattr(s,k,v)
+    # Risk configuration is deliberately separate from the emergency-stop state.
+    # Extra legacy `halted` fields from older clients are ignored by the schema.
+    changes = req.model_dump()
+    for k, v in changes.items():
+        setattr(s, k, v)
     services.audit(db, "RISK_SETTINGS_UPDATED", "risk_settings", s.id, "SUCCESS", req.model_dump(mode="json"))
     db.commit()
     return {"status":"updated","halted":s.halted}
@@ -100,9 +111,38 @@ def create_paper_order(req: schemas.PaperOrderCreate,
     # Explicit hard guard: this release exposes no live order endpoint.
     if TRADING_MODE != "PAPER" or LIVE_EXECUTION_ENABLED:
         raise HTTPException(503, "Unsafe mode configuration; paper order endpoint is disabled.")
+    canonical_payload = req.model_dump(mode="json")
+    fingerprint = hashlib.sha256(
+        json.dumps(canonical_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    # New requests have a durable fingerprint record. Legacy orders created before
+    # this table existed are compared field-by-field for backward compatibility.
+    record = db.query(models.IdempotencyRecord).filter_by(idempotency_key=idempotency_key).first()
+    if record:
+        if record.request_fingerprint != fingerprint:
+            raise HTTPException(409, "Idempotency-Key was already used with a different order payload.")
+        existing = db.get(models.PaperOrder, record.order_id)
+        if existing is None:
+            raise HTTPException(409, "Idempotency record exists but its paper order is missing; contact an administrator.")
+        return existing
+
     existing = db.query(models.PaperOrder).filter_by(idempotency_key=idempotency_key).first()
     if existing:
+        same_request = (
+            existing.instrument == req.instrument.upper()
+            and existing.exchange == req.exchange
+            and existing.side == req.side
+            and existing.quantity == req.quantity
+            and existing.requested_price == req.entry_price
+            and existing.stop_loss == req.stop_loss
+            and existing.target_price == req.target_price
+            and existing.strategy_name == req.strategy_name
+        )
+        if not same_request:
+            raise HTTPException(409, "Idempotency-Key was already used with a different order payload.")
         return existing
+
     approved, reasons, planned_loss = services.authorize_order(db, req)
     decision = {"approved":approved,"reasons":reasons,"planned_loss":str(planned_loss)}
     services.audit(db, "PAPER_ORDER_RISK_DECISION", "paper_order", idempotency_key,
@@ -120,12 +160,47 @@ def create_paper_order(req: schemas.PaperOrderCreate,
         entry_fill_price=fill, mark_price=fill, fees=entry_fee, gross_pnl=Decimal("0"),
         net_pnl=-entry_fee, strategy_name=req.strategy_name
     )
-    db.add(order); db.flush()
-    services.audit(db, "PAPER_ORDER_CREATED", "paper_order", order.id, "SUCCESS",
-                   {"instrument":order.instrument,"side":order.side,"quantity":order.quantity,
-                    "requested_price":str(req.entry_price),"simulated_fill":str(fill),"fees":str(entry_fee)})
-    db.commit(); db.refresh(order)
-    return order
+    db.add(order)
+    try:
+        db.flush()
+        db.add(models.IdempotencyRecord(
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            order_id=order.id,
+        ))
+        services.audit(db, "PAPER_ORDER_CREATED", "paper_order", order.id, "SUCCESS",
+                       {"instrument":order.instrument,"side":order.side,"quantity":order.quantity,
+                        "requested_price":str(req.entry_price),"simulated_fill":str(fill),"fees":str(entry_fee)})
+        db.commit()
+        db.refresh(order)
+        return order
+    except IntegrityError:
+        # A concurrent request may have won the unique-key race. Roll back this
+        # transaction, then return the winner only if its payload is identical.
+        db.rollback()
+        record = db.query(models.IdempotencyRecord).filter_by(idempotency_key=idempotency_key).first()
+        if record:
+            if record.request_fingerprint != fingerprint:
+                raise HTTPException(409, "Idempotency-Key was already used with a different order payload.")
+            winner = db.get(models.PaperOrder, record.order_id)
+            if winner is not None:
+                return winner
+        existing = db.query(models.PaperOrder).filter_by(idempotency_key=idempotency_key).first()
+        if existing:
+            same_request = (
+                existing.instrument == req.instrument.upper()
+                and existing.exchange == req.exchange
+                and existing.side == req.side
+                and existing.quantity == req.quantity
+                and existing.requested_price == req.entry_price
+                and existing.stop_loss == req.stop_loss
+                and existing.target_price == req.target_price
+                and existing.strategy_name == req.strategy_name
+            )
+            if same_request:
+                return existing
+            raise HTTPException(409, "Idempotency-Key was already used with a different order payload.")
+        raise
 
 @app.get("/api/v1/orders", response_model=list[schemas.OrderOut])
 def list_orders(status: str | None = None, instrument: str | None = None,
@@ -145,7 +220,10 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/v1/orders/{order_id}/exit", response_model=schemas.OrderOut)
 def exit_order(order_id: int, req: schemas.ManualExit, db: Session = Depends(get_db)):
-    row=db.get(models.PaperOrder,order_id)
+    row=(db.query(models.PaperOrder)
+         .filter(models.PaperOrder.id == order_id)
+         .with_for_update()
+         .first())
     if not row: raise HTTPException(404,"Order not found")
     if row.status != "OPEN": raise HTTPException(409,"Only open paper orders can be exited")
     services.mark_order(db,row,req.exit_price,req.reason)
@@ -199,8 +277,8 @@ def list_audit_events(limit: int = Query(100, ge=1, le=500), db: Session = Depen
              "outcome":r.outcome,"details":r.details,"created_at":r.created_at} for r in rows]
 
 @app.get("/api/v1/quotes/latest")
-def latest_quote(instrument: str, db: Session = Depends(get_db)):
-    q=db.query(models.Quote).filter_by(instrument=instrument.upper()).order_by(models.Quote.observed_at.desc()).first()
+def latest_quote(instrument: str, exchange: str = Query("NSE", pattern="^(NSE|BSE)$"), db: Session = Depends(get_db)):
+    q=db.query(models.Quote).filter_by(instrument=instrument.upper(), exchange=exchange).order_by(models.Quote.observed_at.desc()).first()
     if not q: raise HTTPException(404,"No paper quote recorded for this instrument.")
     return {"instrument":q.instrument,"exchange":q.exchange,"price":q.price,"source":q.source,
             "observed_at":q.observed_at,"is_synthetic":q.is_synthetic}

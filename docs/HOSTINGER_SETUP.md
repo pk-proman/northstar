@@ -1,122 +1,96 @@
-# Northstar on Hostinger VPS — private staging setup
+# Northstar on Hostinger VPS — current private staging operations
 
-## Safety boundary
-This kit deploys the Release 1 **paper-only** API and stores PostgreSQL privately. It does **not** provide production authentication/MFA, migrations, broker execution, or the API-connected frontend. Do not expose port 8000 publicly or configure a public reverse proxy yet. The UI in `frontend/index.html` is still a demo using browser `localStorage`; it is not yet connected to the API.
+## 1. Scope and safety boundary
 
-## 0. Before running commands
-- Confirm Hostinger VPS is Ubuntu 24.04 LTS and you can SSH in.
-- Keep your VPS SSH session open while changing firewall rules.
-- Do not send SSH credentials, broker API secret, Microsoft 365 credentials, TOTP seeds, or recovery codes in chat.
-- The VPS public IPv4 is the candidate Zerodha static IP. Verify with `curl -4 https://api.ipify.org` from the VPS and compare with Hostinger hPanel. Do not whitelist until confident the outbound route is stable.
+This document describes the reconciled staging topology as of 30 October 2026. It is a paper-trading staging deployment, not a production/live trading system.
 
-## 1. Upload and extract the kit
-On your Mac, upload `Northstar_Hostinger_Deployment_Kit.zip` to your home directory using your preferred SFTP client. Then SSH into the VPS and run:
+- Trading mode is `PAPER` and `LIVE_EXECUTION_ENABLED` is `false` in Compose.
+- PostgreSQL is private on the Docker `internal` network and has no published host port.
+- FastAPI has no published host port; Nginx reaches it as `api:8000` on the `edge` network.
+- Nginx serves the frontend on container port `8080`, published on the VPS loopback only as `127.0.0.1:18080`.
+- Do not publish port 18080, 8000, 5432 or configure public DNS/reverse proxy until the security gates in this document are complete.
+- The application currently has no production authentication/MFA. Treat access as administrator-only through a trusted Mac and SSH tunnel.
+
+Never share SSH passwords, private keys, `.env` contents, broker secrets, tokens, MFA seeds or recovery codes in chat or Git.
+
+## 2. Project and environment files
+
+Expected project path used by the current staging host:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y unzip
-mkdir -p ~/northstar && cd ~/northstar
-unzip ~/Northstar_Hostinger_Deployment_Kit.zip
+/root/northstar/northstar-hostinger-kit
 ```
 
-If you uploaded to another path, adjust the unzip path. Expected directory: `northstar-hostinger-kit/`.
-
-## 2. Install Docker
-From the extracted kit directory:
+The runtime file `deploy/.env` is created on the VPS and must not be overwritten during source updates. The tracked `deploy/.env.example` is a template only.
 
 ```bash
-cd ~/northstar/northstar-hostinger-kit
-bash scripts/install_docker_ubuntu24.sh
-```
-
-## 3. Create secrets and environment file
-
-```bash
-cd ~/northstar/northstar-hostinger-kit/deploy
-cp .env.example .env
-openssl rand -hex 32
-nano .env
-```
-
-Replace `POSTGRES_PASSWORD` with the generated random value (do not reuse any account password). Save and exit. Then:
-
-```bash
+cd /root/northstar/northstar-hostinger-kit/deploy
+cp .env.example .env   # only for a fresh setup; do not run over an existing .env
 chmod 600 .env
 ```
 
-Do not paste the secret into chat or commit `.env` to source control.
+Set a unique strong `POSTGRES_PASSWORD` and review the capital/risk defaults before first startup. Never print the `.env` file or expanded Compose configuration in logs/chat.
 
-## 4. Start the paper API
+## 3. Validate and operate the stack
 
-```bash
-cd ~/northstar/northstar-hostinger-kit/deploy
-sudo docker compose up -d --build
-sudo docker compose ps
-sudo docker compose logs --tail=100 api
-```
-
-The API is bound to `127.0.0.1:8000` on the VPS only; PostgreSQL has no published host port. Live execution is explicitly disabled. Verify on the VPS:
+Run from `/root/northstar/northstar-hostinger-kit`:
 
 ```bash
-curl -sS http://127.0.0.1:8000/health
+docker compose -f deploy/docker-compose.yml config --quiet
+docker compose -f deploy/docker-compose.yml ps
+docker compose -f deploy/docker-compose.yml logs --tail=100 api frontend
 ```
 
-Expected JSON should identify PAPER mode and `live_execution_enabled` as false.
-
-## 5. Test privately from your Mac
-Open a new Terminal window on your Mac (keep this tunnel open):
+Health checks:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 YOUR_SSH_USER@YOUR_VPS_PUBLIC_IP
+curl -fsS http://127.0.0.1:18080/health
+curl -fsS http://127.0.0.1:18080/api/v1/system/status
+curl -I http://127.0.0.1:18080/
 ```
 
-Replace the placeholders with your actual SSH username and VPS IP. Then open `http://127.0.0.1:8000/docs` on your Mac. This uses an SSH tunnel; the API port is not public. The API currently has no application authentication, so treat this as a temporary administrator-only staging tunnel on a trusted Mac. Do not share the tunnel or use it from an untrusted device.
+Expected health/status responses must show `mode` as `PAPER` and `live_execution_enabled` / `live_execution` as `false`.
 
-## 6. Basic operational commands
+Useful commands:
 
 ```bash
-# Status
-sudo docker compose ps
-
-# Logs
-sudo docker compose logs -f api
-
-# Restart API
-sudo docker compose restart api
-
-# Stop services (database data volume remains)
-sudo docker compose down
-
-# Start again
-sudo docker compose up -d
+docker compose -f deploy/docker-compose.yml ps
+docker compose -f deploy/docker-compose.yml logs -f api
+docker compose -f deploy/docker-compose.yml restart api
 ```
 
-Avoid `docker compose down -v`; it deletes the persistent database volume.
+Do not use `docker compose down -v`; it deletes the persistent `northstar_pgdata` volume. Avoid recreating the database container during frontend/API-only changes. Back up both source files and database before any schema or deployment migration.
 
-## 7. Zerodha Kite Connect setup
-- Use the VPS static outbound IPv4 as the candidate IP for the Kite Connect developer profile's IP whitelist for order placement. Confirm the current rules in Zerodha's console; IP changes may be restricted.
-- Redirect URL must be the exact HTTPS callback implemented in Northstar. Do not register a guessed callback route. This kit does not yet implement the Kite OAuth callback.
-- Do not add API key/secret or access tokens to frontend HTML, Git, logs, or chat. Store them in a server-side secret store only after the broker integration is implemented.
-- Kite access tokens expire daily; implement a deliberate user-driven login/session refresh flow rather than assuming permanent access.
-- Live execution remains disabled; do not test by placing real orders.
+## 4. Access the dashboard privately from Mac
 
-## 8. Domain and HTTPS — defer public exposure
-The domain is not configured yet. Before opening Northstar to the public internet, complete authentication + MFA, authorization, CSRF/session protection, rate limits, Alembic migrations, security headers, audit protections, backups/restore tests, and a security review. After that, configure DNS and TLS and expose only the web entrypoint through a reverse proxy. Never publish PostgreSQL or the internal API port directly.
+On Mac Terminal, open an SSH tunnel and leave it running:
 
-## 9. Email and WhatsApp
-### Microsoft 365 email
-Create a dedicated sender mailbox or approved SMTP/Graph sending identity, then configure server-side credentials in a secret manager/environment. Prefer Microsoft Graph with least-privilege permissions and administrator consent where appropriate. Do not use a personal mailbox password or bypass MFA with a shared password.
+```bash
+ssh -L 18080:127.0.0.1:18080 root@YOUR_VPS_IP
+```
 
-### WhatsApp
-Use the official WhatsApp Business Platform Cloud API or an approved provider. You will need a Meta Business portfolio, a WhatsApp Business Account, a dedicated/eligible phone number, an app, a token stored server-side, and approved message templates for business-initiated notifications. Obtain recipient opt-in and honor opt-outs. Start with a test number and template; never put tokens in browser code.
+Then open `http://127.0.0.1:18080` in the Mac browser. Replace `YOUR_VPS_IP` with the VPS address. The tunnel is the access path; do not expose the frontend port publicly. The API is reached by the browser through same-origin Nginx `/api/` routes, not by publishing port 8000.
 
-## 10. Recovery prerequisites
-Before any production use: configure automated encrypted database backups off the VPS, retain backups separately from the server, restrict access, and test restore into a clean environment. Write down who owns the recovery keys and escalation path. This kit does not configure offsite backups automatically.
+## 5. Current frontend/backend boundary
 
-## Current limitations
-- Frontend remains a localStorage demo, not API-connected.
-- No authentication, MFA, authorization or user provisioning yet.
-- No Alembic migration system; current backend creates tables at startup.
-- Order concurrency/idempotency needs database-level hardening and stress tests.
-- Audit events are in the application database and are not yet externally tamper-evident.
-- No market data adapter, instrument master, exchange calendar, historical backtest engine, notification worker, or broker order adapter.
-- No live trading endpoint is implemented; keep it that way until all gates pass.
+The frontend is not wholly server-backed. Current API-backed operations include order retrieval, portfolio summary, paper-order submission, manual paper exits, risk settings and the paper kill switch. Some research candidates, watchlist/chart behavior, capital-ledger interactions and analytics remain local or illustrative. Do not treat illustrative prices or results as market data or authoritative financial records.
+
+## 6. Broker and market data
+
+No live broker execution, Kite OAuth callback, market-data adapter, validated NSE/BSE instrument master, historical backtest engine or notification worker is implemented in this staging baseline. Do not register a guessed broker callback URL or place real orders. Do not put broker credentials in frontend code, Git, logs or chat. Broker selection and integration require separate API, security, data-rights and regulatory review.
+
+## 7. Production/public-exposure gate
+
+Do not expose Northstar publicly until all of the following are designed, implemented and tested:
+
+- Authentication, MFA, secure sessions, CSRF protection, login throttling and password recovery.
+- Role/resource authorization on every private API endpoint.
+- Alembic migrations and tested upgrade/rollback procedures.
+- Database-level uniqueness, transactional risk/capital reservations and concurrency tests for order submission.
+- Append-only audit controls and independently verifiable integrity checkpoints.
+- Rate limiting, security headers, secrets management and security review.
+- Encrypted off-host backups and successful restore drills with agreed RPO/RTO.
+- Operational monitoring, alerting, incident response and access review.
+- Applicable broker, exchange, SEBI and data-provider requirements reviewed with qualified parties.
+
+Live execution remains disabled. Any future enablement requires a separate explicit approval and release gate.

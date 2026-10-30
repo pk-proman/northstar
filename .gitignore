@@ -10,23 +10,21 @@ __pycache__/
 .venv/
 venv/
 
-# macOS and logs
-.DS_Store
-*.log
-
-# Local databases, dumps and backups
+# Runtime data and logs
+*.db
 *.sqlite
 *.sqlite3
-*.db
-*.dump
-*.sql.gz
-*.bak
-*.save
-*.pre-*
-*.backup
+*.log
+*.pid
 
-# Build and temporary files
-dist/
-build/
+# OS/editor files
+.DS_Store
+.AppleDouble
+.idea/
+.vscode/
+
+# Local build/test artifacts
 .coverage
 htmlcov/
+dist/
+build/

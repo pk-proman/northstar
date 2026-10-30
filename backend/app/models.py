@@ -73,3 +73,13 @@ class Quote(Base):
     source: Mapped[str] = mapped_column(String(40), default="manual_paper_feed", nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class IdempotencyRecord(Base):
+    """Durable request fingerprint for safe paper-order retries."""
+    __tablename__ = "idempotency_records"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

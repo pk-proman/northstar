@@ -15,7 +15,6 @@ class RiskSettingsUpdate(BaseModel):
     max_risk_per_trade_pct: Decimal = Field(gt=0, le=2, max_digits=8, decimal_places=4)
     max_open_positions: int = Field(ge=1, le=50)
     cash_reserve_pct: Decimal = Field(ge=0, le=80, max_digits=8, decimal_places=4)
-    halted: bool = False
 
 class PaperOrderCreate(BaseModel):
     instrument: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")

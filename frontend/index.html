@@ -35,7 +35,7 @@ button,input,select{font:inherit}button{cursor:pointer;border:1px solid var(--li
 <main class="main">
   <header class="topbar">
     <div style="display:flex;gap:10px;align-items:flex-start"><button class="mobile-menu ghost" id="menuBtn">☰</button><div><div class="eyebrow">THURSDAY, 29 OCTOBER 2026 · MARKET WORKSPACE</div><h1 id="pageTitle">Trading Control Tower</h1><div class="subtitle" id="pageSubtitle">Your portfolio, signals and risk posture at a glance.</div></div></div>
-    <div class="top-actions"><span class="pill warn"><span class="dot"></span>SIMULATED DATA</span><button class="desktop" id="exportBtn">↧ Export CSV</button><button class="primary" id="quickTradeBtn">＋ Paper trade</button><div class="avatar">P</div></div>
+    <div class="top-actions"><span id="apiStatus" class="pill warn"><span class="dot"></span>API CONNECTING</span><span class="pill warn"><span class="dot"></span>SIMULATED DATA</span><button class="desktop" id="exportBtn">↧ Export CSV</button><button class="primary" id="quickTradeBtn">＋ Paper trade</button><div class="avatar">P</div></div>
   </header>
   <div class="banner"><span style="font-size:17px">⚠</span><div><strong>Paper-trading prototype · No live market data or broker connectivity.</strong> All displayed prices and results are illustrative sample data. Actions update this browser prototype only. Do not use these figures to make investment decisions.</div></div>
 
@@ -108,7 +108,7 @@ button,input,select{font:inherit}button{cursor:pointer;border:1px solid var(--li
           <div class="activity-item"><div class="activity-icon">✓</div><div class="activity-text"><b>Stale-data entry block</b><div class="activity-time">Planned: per-timeframe freshness thresholds</div></div><span class="status green">Required</span></div>
           <div class="activity-item"><div class="activity-icon">✓</div><div class="activity-text"><b>Broker reconciliation</b><div class="activity-time">Not connected in this prototype</div></div><span class="status amber">Not active</span></div>
           <div class="activity-item"><div class="activity-icon">✓</div><div class="activity-text"><b>Protective exit monitoring</b><div class="activity-time">Simulated lifecycle only</div></div><span class="status amber">Not active</span></div>
-          <div class="activity-item"><div class="activity-icon">⛨</div><div class="activity-text"><b>Emergency stop</b><div class="activity-time">Blocks new paper entries in this browser</div></div><button id="killSwitch" class="danger">Halt entries</button></div>
+          <div class="activity-item"><div class="activity-icon">⛨</div><div class="activity-text"><b>Emergency stop</b><div class="activity-time">Blocks new paper entries across Northstar</div></div><button id="killSwitch" class="danger">Halt entries</button></div>
         </div>
         <div class="banner" style="margin:18px 0 0"><span>⚠</span><div>Never enable live execution until broker/API requirements, applicable SEBI/exchange rules, market-data rights, audit logging, failure recovery and live order protections have been verified.</div></div>
       </div>
@@ -259,7 +259,63 @@ $('resetDemo').addEventListener('click',()=>{if(confirm('Reset all local demo ch
 $('overviewRange').addEventListener('change',()=>{$('chartRange').value=$('overviewRange').value==='7'?'7':$('overviewRange').value==='90'?'90':'30';renderOverview()});
 $('overviewSegment').addEventListener('change',()=>toast('Segment filter: '+$('overviewSegment').value+' (sample view)'));
 $('chartRange').addEventListener('change',renderChart);
-loadState();renderOverview();renderCandidates();renderPortfolio();renderOrders();renderAnalytics();renderRisk();
+// Northstar Release 2 API integration. API is same-origin through the private nginx proxy.
+const NS_API = {
+  async request(path, options={}) {
+    const headers={'Content-Type':'application/json', ...(options.headers||{})};
+    const res=await fetch(path,{...options,headers,credentials:'same-origin',cache:'no-store'});
+    const raw=await res.text(); let data; try{data=raw?JSON.parse(raw):null}catch{data=raw}
+    if(!res.ok){const detail=data&&data.detail; throw new Error(typeof detail==='string'?detail:(detail?JSON.stringify(detail):`API error ${res.status}`));}
+    return data;
+  },
+  async orders(){return this.request('/api/v1/orders?limit=500')},
+  async summary(){return this.request('/api/v1/portfolio/summary')},
+  async risk(){return this.request('/api/v1/risk-settings')},
+  async status(){return this.request('/api/v1/system/status')}
+};
+function nsMapOrder(o){
+  const entry=Number(o.entry_fill_price||o.requested_price||0), mark=Number(o.mark_price||entry), qty=Number(o.quantity||0);
+  return {id:String(o.id),apiId:o.id,symbol:o.instrument,side:o.side,qty,entry,stop:Number(o.stop_loss),target:Number(o.target_price),mark,
+    pnl:Number(o.net_pnl||0),costs:Number(o.fees||0),status:o.status,date:(o.created_at||'').slice(0,10),strategy:o.strategy_name||'Manual paper',exit:Number(o.exit_fill_price||0),reason:o.exit_reason||''};
+}
+async function nsRefreshFromApi(){
+  const [orders,risk,summary,status]=await Promise.all([NS_API.orders(),NS_API.risk(),NS_API.summary(),NS_API.status()]);
+  state.positions=orders.map(nsMapOrder);
+  state.closed=orders.filter(o=>o.status==='CLOSED').map(o=>({id:String(o.id),date:(o.closed_at||o.created_at||'').slice(0,10),symbol:o.instrument,strategy:o.strategy_name,side:o.side,entry:Number(o.entry_fill_price),exit:Number(o.exit_fill_price||0),qty:Number(o.quantity),costs:Number(o.fees||0),pnl:Number(o.net_pnl||0),reason:o.exit_reason||'Closed'}));
+  state.risk={capital:Number(risk.max_capital),daily:Number(risk.max_daily_loss),perTrade:Number(risk.max_risk_per_trade_pct),positions:Number(risk.max_open_positions),reserve:Number(risk.cash_reserve_pct)};
+  state.halted=!!risk.halted;
+  state.startingCapital=Number(summary.external_flows||0);
+  const b=document.getElementById('apiStatus'); if(b){b.className='pill';b.innerHTML='<span class="dot"></span>API CONNECTED';}
+  renderOverview();renderPortfolio();renderOrders();renderAnalytics();renderRisk();
+}
+function nsApiError(err){const b=document.getElementById('apiStatus');if(b){b.className='pill warn';b.innerHTML='<span class="dot"></span>API UNAVAILABLE';}toast('Backend request failed: '+(err?.message||'unknown error'));}
+// Replace the prototype-only submit handler with a persistent backend paper-order request.
+const nsSubmitOld=document.getElementById('submitTrade');
+if(nsSubmitOld){const nsSubmitNew=nsSubmitOld.cloneNode(true);nsSubmitOld.parentNode.replaceChild(nsSubmitNew,nsSubmitOld);nsSubmitNew.addEventListener('click',async()=>{
+  const instrument=$('tradeSymbol').value.trim().toUpperCase(),side=$('tradeSide').value,quantity=+$('tradeQty').value,entry_price=+$('tradeEntry').value,stop_loss=+$('tradeStop').value,target_price=+$('tradeTarget').value;
+  if(!instrument||!Number.isInteger(quantity)||quantity<1||![entry_price,stop_loss,target_price].every(v=>Number.isFinite(v)&&v>0)){toast('Check instrument, quantity and prices.');return;}
+  nsSubmitNew.disabled=true;
+  try{
+    const key='ns-'+crypto.randomUUID();
+    await NS_API.request('/api/v1/paper/orders',{method:'POST',headers:{'Idempotency-Key':key},body:JSON.stringify({instrument,exchange:'NSE',side,quantity,entry_price,stop_loss,target_price,strategy_name:'Manual paper'})});
+    $('tradeModal').classList.remove('show'); await nsRefreshFromApi(); toast('Paper order persisted by Northstar backend. No broker order was sent.'); showPage('orders');
+  }catch(err){nsApiError(err)}finally{nsSubmitNew.disabled=false;}
+});}
+// Manual exits are backend-authoritative. Release 1 uses current mark as the simulated exit price.
+closePosition=async function(id){const p=state.positions.find(x=>String(x.id)===String(id));if(!p||p.status!=='OPEN')return;try{await NS_API.request(`/api/v1/orders/${p.apiId||p.id}/exit`,{method:'POST',body:JSON.stringify({exit_price:Number(p.mark||p.entry),reason:'MANUAL'})});await nsRefreshFromApi();toast('Paper exit recorded by backend; no broker order was sent.')}catch(err){nsApiError(err)}};
+// Save risk controls through the API, not browser-local storage.
+const nsRiskOld=document.getElementById('saveRisk');
+if(nsRiskOld){const nsRiskNew=nsRiskOld.cloneNode(true);nsRiskOld.parentNode.replaceChild(nsRiskNew,nsRiskOld);nsRiskNew.addEventListener('click',async()=>{
+  const r={max_capital:+$('riskCapital').value,max_daily_loss:+$('riskDaily').value,max_risk_per_trade_pct:+$('riskPerTrade').value,max_open_positions:+$('riskPositions').value,cash_reserve_pct:+$('riskReserve').value,halted:!!state.halted};
+  if(Object.values(r).some(v=>typeof v==='number'&&(!Number.isFinite(v)||v<0))||r.max_capital<10000||r.max_risk_per_trade_pct>2||r.max_open_positions<1||r.cash_reserve_pct>80||r.max_daily_loss<=0){toast('Invalid risk settings.');return;}
+  try{await NS_API.request('/api/v1/risk-settings',{method:'PUT',body:JSON.stringify(r)});await nsRefreshFromApi();toast('Risk settings saved to backend.')}catch(err){nsApiError(err)}
+});}
+// Kill-switch is also persisted by the API.
+const nsKillOld=document.getElementById('killSwitch');
+if(nsKillOld){const nsKillNew=nsKillOld.cloneNode(true);nsKillOld.parentNode.replaceChild(nsKillNew,nsKillOld);nsKillNew.addEventListener('click',async()=>{try{const halted=!state.halted;await NS_API.request('/api/v1/admin/kill-switch?halted='+halted,{method:'POST'});await nsRefreshFromApi();toast(halted?'Paper entries halted':'Paper entries resumed');}catch(err){nsApiError(err)}});}
+// Do not silently show browser-local trade state if the backend cannot be reached.
+loadState();
+(async()=>{try{await nsRefreshFromApi();renderCandidates();}catch(err){nsApiError(err);state.positions=[];state.closed=[];renderOverview();renderCandidates();renderPortfolio();renderOrders();renderAnalytics();renderRisk();}})();
 </script>
 </body>
 </html>

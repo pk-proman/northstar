@@ -71,7 +71,14 @@ def daily_realized_loss(db: Session) -> Decimal:
     return max(Decimal("0"), -combined)
 
 def authorize_order(db: Session, req) -> tuple[bool, list[str], Decimal]:
-    settings = ensure_settings(db)
+    # Serialize risk evaluation against the singleton settings row. On PostgreSQL,
+    # concurrent order requests wait here and re-evaluate exposure after the prior
+    # transaction commits. SQLite ignores FOR UPDATE (used only for local tests).
+    ensure_settings(db)
+    settings = (db.query(models.RiskSettings)
+                .filter(models.RiskSettings.id == 1)
+                .with_for_update()
+                .one())
     reasons = []
     if TRADING_MODE != "PAPER" or LIVE_EXECUTION_ENABLED:
         reasons.append("UNSAFE_MODE_CONFIGURATION")

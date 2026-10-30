@@ -1,26 +1,49 @@
-# Northstar Release 2 — frontend/API integration
+# Northstar Release 2 — frontend/API integration (staging baseline)
 
-## What this release changes
-- Adds an Nginx frontend container, serving the existing dashboard on VPS loopback port 8080.
-- Proxies `/api/*` and `/health` to FastAPI over the private Docker network.
-- Dashboard order list, overview positions, paper-order submission, manual paper exits, risk settings and paper kill switch use the backend API.
-- API connection status is displayed in the dashboard.
-- No live broker order endpoint is added; paper mode remains enforced.
+## Deployment shape
 
-## Important limitations
-- This release does **not** yet add authentication or MFA. The API has sensitive unauthenticated routes, including risk settings and the kill switch. Keep ports bound to `127.0.0.1`, access only via SSH tunnel, and do not publish the domain or open these ports publicly.
-- Research candidates, the chart, some capital-ledger interactions and portions of analytics remain illustrative/browser-side. Do not treat them as market data or authoritative financial records.
-- Release 1 uses `Base.metadata.create_all`; Alembic migrations, robust concurrent idempotency and production-grade audit protection are not part of this package.
-- No live market data, Kite OAuth, real broker execution, or notifications are implemented.
+- Nginx serves the existing dashboard on container port `8080`.
+- The VPS publishes the frontend only on `127.0.0.1:18080`.
+- Nginx proxies `/api/` and `/health` to FastAPI at `http://api:8000` over Docker network `edge`.
+- FastAPI is attached to `edge` and the private `internal` network; it has no host-published port.
+- PostgreSQL is attached only to `internal`; it has no host-published port.
 
-## Deploy to existing Hostinger staging
-1. Back up the existing project directory and database volume before replacing files.
-2. Extract this package on your Mac, then upload the `northstar-hostinger-kit` directory or ZIP to `/root/northstar/`.
-3. Ensure the existing `/root/northstar/northstar-hostinger-kit/deploy/.env` is retained. Do not overwrite it with `.env.example`.
-4. From `/root/northstar/northstar-hostinger-kit/deploy`, run `docker compose config --quiet`.
-5. Run `docker compose up -d --build`.
-6. Check `docker compose ps`, `curl -fsS http://127.0.0.1:8000/health`, and `curl -I http://127.0.0.1:8080/`.
-7. On your Mac, create a tunnel: `ssh -L 8080:127.0.0.1:8080 root@YOUR_VPS_IP`. Then browse to `http://127.0.0.1:8080`. Keep the tunnel open.
+The current Compose file uses two networks: `internal` (`internal: true`) for API/database communication and `edge` for frontend/API communication. Do not revert to a single internal-only network: that topology previously prevented Nginx's published frontend port from working on this host.
 
-## Rollback
-Restore the backed-up frontend and `docker-compose.yml`, then run `docker compose up -d --build`. Do not remove Docker volumes.
+## API-backed dashboard workflows
+
+The current dashboard uses backend API calls for:
+
+- Order list and portfolio summary refresh.
+- Paper-order submission with an `Idempotency-Key` header.
+- Manual paper-order exit.
+- Risk settings retrieval and update.
+- Paper kill-switch state.
+- System status and API connection feedback.
+
+## Remaining local/illustrative behavior
+
+Research candidates, watchlist/chart behavior, some capital-ledger interactions and portions of analytics remain local or illustrative. This release does not provide live market data, broker connectivity, real exchange order execution or a validated backtesting engine.
+
+## Security limitations
+
+This release does not provide production authentication/MFA or complete authorization. Some sensitive endpoints (including risk settings and kill switch) must be treated as trusted-admin-only. Keep the frontend loopback-bound and access it only through SSH tunneling. Do not configure public DNS or expose the app to the internet yet.
+
+The backend still uses startup table creation rather than Alembic migrations. Concurrent order idempotency, transaction-level capital/risk reservation and externally verifiable audit integrity require hardening before production use.
+
+## Private access from Mac
+
+```bash
+ssh -L 18080:127.0.0.1:18080 root@YOUR_VPS_IP
+```
+
+Browse to `http://127.0.0.1:18080` while the tunnel remains open.
+
+## Safe source deployment principles
+
+1. Back up the project source and database before deployment.
+2. Preserve the VPS `deploy/.env`; never replace it with `.env.example`.
+3. Validate with `docker compose -f deploy/docker-compose.yml config --quiet`.
+4. Inspect the planned changes and service status before applying.
+5. Never use `docker compose down -v` on staging.
+6. Verify `/health`, `/api/v1/system/status` and the frontend after deployment.
